@@ -250,12 +250,53 @@ if opt_type == 'mintime' and pars["optim_opts"]["safe_traj"] \
 # PREPARE REFTRACK -----------------------------------------------------------------------------------------------------
 # ----------------------------------------------------------------------------------------------------------------------
 
+def prep_track_with_fallback(reftrack_input, debug_output):
+    base_reg_smooth_opts = copy.deepcopy(pars["reg_smooth_opts"])
+    base_stepsize_opts = copy.deepcopy(pars["stepsize_opts"])
+
+    s_reg_base = float(base_reg_smooth_opts["s_reg"])
+    stepsize_reg_base = float(base_stepsize_opts["stepsize_reg"])
+
+    # keep the original settings first, then progressively smooth more and sample more coarsely
+    retry_configs = [
+        (1.0, 1.0),
+        (2.0, 1.0),
+        (4.0, 1.0),
+        (8.0, 1.0),
+        (8.0, 1.5),
+        (8.0, 2.0),
+        (16.0, 2.0),
+        (16.0, 3.0),
+    ]
+
+    last_exc = None
+    for attempt_idx, (s_reg_mult, stepsize_mult) in enumerate(retry_configs):
+        reg_smooth_opts_retry = copy.deepcopy(base_reg_smooth_opts)
+        stepsize_opts_retry = copy.deepcopy(base_stepsize_opts)
+
+        reg_smooth_opts_retry["s_reg"] = s_reg_base * s_reg_mult
+        stepsize_opts_retry["stepsize_reg"] = stepsize_reg_base * stepsize_mult
+
+        if attempt_idx > 0:
+            print("WARNING: Track preparation failed due to crossed spline normals -> retrying with s_reg=%.2f, "
+                  "stepsize_reg=%.2f." % (reg_smooth_opts_retry["s_reg"], stepsize_opts_retry["stepsize_reg"]))
+
+        try:
+            return helper_funcs_glob.src.prep_track.prep_track(reftrack_imp=reftrack_input,
+                                                               reg_smooth_opts=reg_smooth_opts_retry,
+                                                               stepsize_opts=stepsize_opts_retry,
+                                                               debug=debug_output,
+                                                               min_width=imp_opts["min_track_width"])
+        except IOError as exc:
+            if "spline normals are crossed" not in str(exc):
+                raise
+            last_exc = exc
+
+    raise last_exc
+
+
 reftrack_interp, normvec_normalized_interp, a_interp, coeffs_x_interp, coeffs_y_interp = \
-    helper_funcs_glob.src.prep_track.prep_track(reftrack_imp=reftrack_imp,
-                                                reg_smooth_opts=pars["reg_smooth_opts"],
-                                                stepsize_opts=pars["stepsize_opts"],
-                                                debug=debug,
-                                                min_width=imp_opts["min_track_width"])
+    prep_track_with_fallback(reftrack_input=reftrack_imp, debug_output=debug)
 
 # ----------------------------------------------------------------------------------------------------------------------
 # CALL OPTIMIZATION ----------------------------------------------------------------------------------------------------
@@ -340,12 +381,8 @@ if opt_type == 'mintime' and mintime_opts["reopt_mintime_solution"]:
     racetrack_mintime = np.column_stack((raceline_mintime, w_tr_right_mintime, w_tr_left_mintime))
 
     # use spline approximation a second time
-    reftrack_interp, normvec_normalized_interp, a_interp = \
-        helper_funcs_glob.src.prep_track.prep_track(reftrack_imp=racetrack_mintime,
-                                                    reg_smooth_opts=pars["reg_smooth_opts"],
-                                                    stepsize_opts=pars["stepsize_opts"],
-                                                    debug=False,
-                                                    min_width=imp_opts["min_track_width"])[:3]
+    reftrack_interp, normvec_normalized_interp, a_interp, _, _ = \
+        prep_track_with_fallback(reftrack_input=racetrack_mintime, debug_output=False)
 
     # set artificial track widths for reoptimization
     w_tr_tmp = 0.5 * pars["optim_opts"]["w_tr_reopt"] * np.ones(reftrack_interp.shape[0])
